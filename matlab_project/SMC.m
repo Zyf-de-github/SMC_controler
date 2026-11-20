@@ -6,11 +6,11 @@ T = 10;             % 仿真总时长 (秒)
 dt = 0.001;         % 仿真步长 (秒)
 
 
-switch_track = 1;   % 0:关激励信号
+switch_track = 2;   % 0:关激励信号
                     % 1:正弦连续信号
                     % 2:正弦阶跃信号
 
-switch_force = 0;   % 外部扰动力开关
+switch_force = 1;   % 外部扰动力开关
 switch_debuge = 0;  % 0:定性分析各个状态量、相轨迹等
                     % 1：定量对比各个参数不同跟踪效果
 
@@ -46,11 +46,21 @@ v_ASMC = 0;             % u的导数中间变量
 last_sigma_ASMC = 0;    % 离散差分中间变量
 
 % TSMC参数
+rho_TSMC = 100;         %rho充分大且能收敛
 c_TSMC = c;
-rho_TSMC = 50;        %rho充分大且能收敛
 width_TSMC = width;
-q_TSMC = 1;
-p_TSMC = 3;
+L_TSMC = L;
+p_TSMC = 5;    % p%2==1 && 1>q/p
+q_TSMC = 3;    % q%2==1 && 1>q/p
+B_TSMC = 1;
+
+% NTSMC参数
+c_NTSMC = c;
+width_NTSMC = width;
+L_NTSMC = L;
+p_NTSMC = 5;    % p%2==1 && 1<p/q<2
+q_NTSMC = 3;    % q%2==1 && 1<p/q<2
+B_NTSMC = 1;
 
 % ISMC参数
 c_ISMC = c;                                 % 滑模面参数 (决定了滑模运动时的收敛速度)，对应现实的转动惯量
@@ -59,7 +69,6 @@ alpha_ISMC = alpha;                         % 人为设计的收敛速度
 rho_ISMC = L_ISMC + alpha_ISMC/sqrt(2);     % 综合切换增益
 width_ISMC= width;                          % 边界层厚度 (用于平滑 sign 函数，防止仿真发散)
 c2_ISMC=100;
-
 u1_ISMC=0;                                  % u1中间变量，用于补偿状态不在滑模面的力矩
 u2_ISMC=0;                                  % u2中间变量，用于让滑模面趋近于0的力矩
 z_ISMC=0;                                   % u2的积分中间量
@@ -135,7 +144,7 @@ history_t  = 0:dt:T-dt;         % 时间t
         if(switch_force==0)
             f_dist=0;
         elseif(t>=5&&t<=6)
-            f_dist = 10;
+            f_dist = 20;
         else
             f_dist = 8 * sin(3*t); 
         end
@@ -169,26 +178,52 @@ history_t  = 0:dt:T-dt;         % 时间t
     
     
         %% TSMC 终端滑模
-        % sigma = err_spd + c_TSMC * power(abs(err_pos), p_TSMC / q_TSMC) * sign(err_pos);
-        % u = -rho_TSMC * sign(sigma);
+        % % 简单到达律形式
+        % lambda_TSMC = q_TSMC / p_TSMC;
+        % sigma = err_spd + c_TSMC * power(abs(err_pos), lambda_TSMC) * sign(err_pos);
+        % % u = -rho_TSMC * sign(sigma);
         % u = -rho_TSMC * sat(sigma, width_TSMC);
+
+        % % 完整到达律:等效控制+切换控制
+        % lambda_TSMC = q_TSMC / p_TSMC;
+        % sigma = err_spd + c_TSMC * power(abs(err_pos), lambda_TSMC) * sign(err_pos);
+        % u_eq = -power(abs(err_pos), lambda_TSMC-1) * sign(err_pos) * B_TSMC * c_TSMC * lambda_TSMC * err_spd;
+        % % 原版
+        % % u_n = -B_TSMC * (L_TSMC + abs(u_eq)) * sign(sigma,width);
+        % % 平滑改进
+        % u_n = -B_TSMC * (L_TSMC + abs(u_eq)) * sat(sigma,width_TSMC);
+        % u = u_eq + u_n;
+
+
+
+        %% NTSMC 非奇异终端滑模
+        % % 严格来说，NTSMC性能可能不如普通终端滑模，他是为了根除err_pos趋近于0时产生的奇异性，牺
+        % % 牲了部分逼近能力，且仿真环境过于理性，不会有实际的阻力、误差、执行器饱和上限等问题。
+        % lambda_NTSMC = p_NTSMC / q_NTSMC;
+        % sigma = power(abs(err_spd), lambda_NTSMC) * sign(err_spd) + c_NTSMC * err_pos;
+        % u_eq = -power(abs(err_spd), 2-lambda_NTSMC) * B_NTSMC * c_NTSMC / lambda_NTSMC;
+        % % 原版
+        % % u_n = -B_NTSMC * (L_NTSMC + abs(u_eq)) * sign(sigma,width);
+        % % 平滑改进
+        % u_n = -B_NTSMC * (L_NTSMC + abs(u_eq)) * sat(sigma,width_NTSMC);
+        % u = u_eq + u_n;
         
     
+        
         %% ISMC 积分滑膜
-        % sigma = err_spd + c_ISMC * err_pos; 
-        % u2_ISMC = c2_ISMC * sigma;
-        % z_ISMC = z_ISMC + u2_ISMC * dt;
-        % s_ISMC = sigma - z_ISMC;
-        % 
-        % % 原版
-        % % u1 = rho * sign(s);
-        % % 平滑改进
-        % u1_ISMC = rho_ISMC * sat(s_ISMC,width_ISMC);
-        % 
-        % u = -(u1_ISMC + u2_ISMC);
+        % ISMC面对阶跃信号效果明显要更强，算是一个比较满意的控制算法，不论是阶跃信号还是连续信号效果都可以
+        sigma = err_spd + c_ISMC * err_pos; 
+        u2_ISMC = c2_ISMC * sigma;
+        z_ISMC = z_ISMC + u2_ISMC * dt;
+        s_ISMC = sigma - z_ISMC;
+        % 原版
+        % u1 = rho * sign(s);
+        % 平滑改进
+        u1_ISMC = rho_ISMC * sat(s_ISMC,width_ISMC);
+        u = -(u1_ISMC + u2_ISMC);
 
 
-        %% STA 超螺旋滑膜
+        %% STASMC 超螺旋滑膜
         % sigma = err_spd + c_STA * err_pos;
         % % 原版
         % % w_STA = w_STA + b_SAT * sign(sigma) * dt;
@@ -200,7 +235,6 @@ history_t  = 0:dt:T-dt;         % 时间t
     
 
         %% FTSMC 快速中断滑膜
-        % 做了去复数优化，且会在误差err_pos趋近于0时power(err_pos, q_FTSMC / p_FTSMC - 1)得到1/0导致力矩爆炸,有奇异性
         % sigma = err_spd + c_FTSMC * err_pos + c2_FTSMC * power( abs(err_pos), q_FTSMC/p_FTSMC) * sign(err_pos); 
         % % 原版
         % % u = - power(b_FTSMC, -1) * ...
@@ -212,15 +246,14 @@ history_t  = 0:dt:T-dt;         % 时间t
 
 
         %% NFTSMC 传统滑膜
-        sigma = err_pos ...
-            + alpha_NFT*power(abs(err_pos),r1_NFT)*sign(err_pos) ...    % 远端加速
-            + bate_NFT*power(abs(err_spd),r2_NFT)*sign(err_spd);        % 防超调
-        u = - (1+alpha_NFT*r1_NFT*power(abs(err_pos),r1_NFT-1)) * power(abs(err_spd),2-r2_NFT) * sign(err_spd) / (bate_NFT * r2_NFT) ...
-            - k1_NFT * sign(sigma) ...
-            - k2_NFT * sigma ...
-            + (err_spd - xd_NFT) / dt;
-        
-        xd_NFT = err_spd;
+        % sigma = err_pos ...
+        %     + alpha_NFT*power(abs(err_pos),r1_NFT)*sign(err_pos) ...    % 远端加速
+        %     + bate_NFT*power(abs(err_spd),r2_NFT)*sign(err_spd);        % 防超调
+        % u = - (1+alpha_NFT*r1_NFT*power(abs(err_pos),r1_NFT-1)) * power(abs(err_spd),2-r2_NFT) * sign(err_spd) / (bate_NFT * r2_NFT) ...
+        %     - k1_NFT * sign(sigma) ...
+        %     - k2_NFT * sigma ...
+        %     + (err_spd - xd_NFT) / dt;
+        % xd_NFT = err_spd;
 
 
 
